@@ -1,0 +1,36 @@
+model:
+  feature_dim: 192
+  vit_dim: 192
+  text_dim: 192
+  vit_layers: 2
+  text_layers: 3
+  use_fft: true
+  temporal_mode: tcn
+  dropout: 0.1
+  pretrained: true
+
+train:
+  epochs_stage1: 30
+  epochs_stage2: 15
+  epochs_stage3: 5
+  lr_stage1: 1.0e-4
+  lr_stage2: 3.0e-5
+  lr_stage3: 1.0e-5
+  batch_size: 8
+  weight_decay: 0.01
+  grad_clip: 1.0
+
+pruning:
+  prune_ratio: 0.30
+  n_importance_batches: 32
+
+distillation:
+  temperature: 4.0
+  lambda1: 0.5
+  lambda2: 0.01
+
+constraints:
+  max_params_M: 20
+  max_flops_G: 3.0
+  max_ram_MB: 700
+  target_fps: 15

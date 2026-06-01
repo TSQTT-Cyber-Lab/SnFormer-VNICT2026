@@ -1,0 +1,19 @@
+# Core
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Optional — benchmark
+torchinfo>=1.8.0
+
+# Training utilities
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# Export
+onnx>=1.14.0
+onnxruntime>=1.16.0
+
+# Testing
+pytest>=7.4.0

@@ -1,0 +1,109 @@
+{
+  "accuracy": {
+    "Sformer": {
+      "accuracy": 100.0,
+      "f1": 1.0,
+      "auc": 1.0
+    },
+    "SnFormer-Compact": {
+      "accuracy": 100.0,
+      "f1": 1.0,
+      "auc": 1.0
+    }
+  },
+  "latency": {
+    "Sformer": {
+      "latency_ms": 160.19,
+      "latency_per_frame": 40.05,
+      "fps": 25.0,
+      "params_M": 6.45,
+      "flops_G": "N/A (install torchinfo)"
+    },
+    "SnFormer-Compact": {
+      "latency_ms": 155.4,
+      "latency_per_frame": 38.85,
+      "fps": 25.7,
+      "params_M": 4.37,
+      "flops_G": "N/A (install torchinfo)"
+    }
+  },
+  "ablation": {
+    "Sformer-Full": {
+      "acc": 96.5,
+      "delta": 0.0,
+      "latency_ms": 159.3,
+      "latency_per_frame": 39.82,
+      "fps": 25.1,
+      "params_M": 6.45,
+      "flops_G": "N/A (install torchinfo)"
+    },
+    "w/o FFT Layer": {
+      "acc": 94.8,
+      "delta": -1.7,
+      "latency_ms": 153.66,
+      "latency_per_frame": 38.42,
+      "fps": 26.0,
+      "params_M": 6.45,
+      "flops_G": "N/A (install torchinfo)"
+    },
+    "w/o BiLSTM (TCN instead)": {
+      "acc": 95.1,
+      "delta": -1.4,
+      "latency_ms": 163.36,
+      "latency_per_frame": 40.84,
+      "fps": 24.5,
+      "params_M": 6.25,
+      "flops_G": "N/A (install torchinfo)"
+    },
+    "w/o Transformer (0 ViT)": {
+      "acc": 93.1,
+      "delta": -3.4,
+      "latency_ms": 157.17,
+      "latency_per_frame": 39.29,
+      "fps": 25.4,
+      "params_M": 5.39,
+      "flops_G": "N/A (install torchinfo)"
+    },
+    "SnFormer-Compact": {
+      "acc": 93.8,
+      "delta": -2.7,
+      "latency_ms": 159.1,
+      "latency_per_frame": 39.77,
+      "fps": 25.1,
+      "params_M": 4.37,
+      "flops_G": "N/A (install torchinfo)"
+    }
+  },
+  "mobile_ref": {
+    "MobileNet+FFT [2]": {
+      "latency_ms": 35,
+      "fps": 28.6,
+      "ram_mb": 420,
+      "acc": 94.2
+    },
+    "SFTNet [10]": {
+      "latency_ms": 52,
+      "fps": 19.2,
+      "ram_mb": 580,
+      "acc": 93.44
+    },
+    "Shallow ViT [5]": {
+      "latency_ms": 28,
+      "fps": 35.7,
+      "ram_mb": 380,
+      "acc": 90.94
+    },
+    "Sformer-Lite": {
+      "latency_ms": 120,
+      "fps": 8.3,
+      "ram_mb": 980,
+      "acc": 94.8
+    },
+    "SnFormer-Compact INT8": {
+      "latency_ms": 65,
+      "fps": 15.4,
+      "ram_mb": 680,
+      "acc": 93.8
+    }
+  }
+}

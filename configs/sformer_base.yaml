@@ -1,0 +1,17 @@
+model:
+  feature_dim: 256
+  vit_dim: 256
+  text_dim: 256
+  vit_layers: 2
+  text_layers: 4
+  use_fft: true
+  temporal_mode: bilstm
+  dropout: 0.1
+  pretrained: true
+
+train:
+  epochs_stage1: 50
+  lr_stage1: 1.0e-4
+  batch_size: 8
+  weight_decay: 0.01
+  grad_clip: 1.0
