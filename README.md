@@ -68,8 +68,8 @@ Caption/URL  ──────────────────────�
 ## Cài đặt
 
 ```bash
-git clone https://github.com/ptson/sformer-snformer.git
-cd sformer-snformer
+git clone https://github.com/TSQTT-Cyber-Lab/SnFormer-VNICT2026.git
+cd SnFormer-VNICT2026
 pip install -r requirements.txt
 ```
 
@@ -128,7 +128,7 @@ python train/trainer.py --stage 0 --epochs 30
 ## Cấu trúc repo
 
 ```
-sformer-snformer/
+SnFormer-VNICT2026/
 ├── models/
 │   ├── sformer.py           # Sformer full — dual-branch multimodal
 │   ├── snformer.py          # SnFormer — pruning + distillation + QAT
