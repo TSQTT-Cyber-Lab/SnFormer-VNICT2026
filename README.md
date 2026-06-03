@@ -110,18 +110,31 @@ python benchmark/run_benchmark.py --num-frames 8 --iters 100
 ### Huấn luyện
 
 ```bash
-# Stage 1: Pretrain Sformer-Full
-python train/trainer.py --stage 1 --epochs 30 --lr 1e-4
+# Demo/debug không cần dataset thực
+python train/trainer.py --stage 1 --dummy --epochs 5 --lr 1e-4
+
+# Stage 1: Pretrain Sformer-Full với dataset thật
+python train/trainer.py --stage 1 --data-dir data/raw --epochs 30 --lr 1e-4
+# hoặc:
+python train/trainer.py --stage 1 --data-csv data/train.csv --epochs 30 --lr 1e-4
+
+# Dataset thật đang nằm trong các subfolder train/ của repo này
+python train/trainer.py --stage 0 --data-csv data/train_subfolders_manifest.csv --epochs 30 --lr 1e-4
+
+# Smoke test toàn pipeline bằng dữ liệu thật trên CPU
+python train/trainer.py --stage 0 --data-csv data/train_subfolders_manifest.csv --max-samples 16 --epochs 2 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --cpu
 
 # Stage 2: Structured Pruning + Knowledge Distillation
-python train/trainer.py --stage 2 --epochs 15 --prune-ratio 0.3
+python train/trainer.py --stage 2 --data-dir data/raw --epochs 15 --prune-ratio 0.3
 
 # Stage 3: QAT INT8
-python train/trainer.py --stage 3 --epochs 5
+python train/trainer.py --stage 3 --data-dir data/raw --epochs 5
 
-# Hoặc chạy toàn bộ pipeline
-python train/trainer.py --stage 0 --epochs 30
+# Hoặc chạy toàn bộ pipeline với dataset thật
+python train/trainer.py --stage 0 --data-dir data/raw --epochs 30
 ```
+
+`trainer.py` luôn yêu cầu một trong ba lựa chọn: `--data-dir`, `--data-csv`, hoặc `--dummy`.
 
 ---
 
@@ -176,7 +189,7 @@ Repo này cung cấp mock data để chạy demo offline. Để reproduce kết 
 - **FaceForensics++** — [github.com/ondyari/FaceForensics](https://github.com/ondyari/FaceForensics)
 - **DFDC** — [ai.facebook.com/datasets/dfdc](https://ai.facebook.com/datasets/dfdc)
 - **Celeb-DF v2** — [github.com/yuezunli/celeb-deepfakeforensics](https://github.com/yuezunli/celeb-deepfakeforensics)
-- **WildDeepfake** — [github.com/OpenTAL/WildDeepfake](https://github.com/OpenTAL/WildDeepfake)
+- **WildDeepfake** — [github.com/OpenTAL/WildDeepfake](https://github.com/OpenTAI/wild-deepfake)
 
 Thay `make_dummy_loader()` trong `train/trainer.py` bằng `torch.utils.data.DataLoader` thực.
 
