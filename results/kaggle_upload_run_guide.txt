@@ -1,0 +1,375 @@
+SFORMER / SNFORMER - KAGGLE UPLOAD AND RUN GUIDE
+
+Muc tieu
+- Upload project va dataset len Kaggle.
+- Chay training/testing voi CPU/GPU manh hon may local.
+- Luu ket qua dung theo README:
+  - checkpoints/sformer_stage1.pt
+  - checkpoints/snformer_stage2.pt
+  - checkpoints/snformer_stage3_qat.pt
+  - results/training_history.json
+  - results/benchmark_results.json
+
+
+1. Chuan bi project truoc khi upload
+
+Nen tach thanh 2 Kaggle datasets rieng:
+
+Dataset 1: snformer-code
+- Chua source code project.
+- Khong nen chua:
+  - .git/
+  - .venv/
+  - __pycache__/
+  - checkpoints/
+  - results/
+  - video dataset lon
+
+Dataset 2: snformer-data
+- Chua du lieu that, vi du:
+  - Celeb-DF-v2/
+  - Celeb-DF/
+  - DeepfakeTIMIT/
+  - DeepFakes_v1/
+  - DeepFakes_v4/
+
+Neu dataset co license han che, dat Kaggle dataset o che do Private.
+
+
+2. Upload bang giao dien Kaggle
+
+2.1. Upload code
+- Vao Kaggle -> Datasets -> New Dataset.
+- Tao dataset ten: snformer-code.
+- Upload toan bo source code project.
+- Khong upload .venv, checkpoints, results, video dataset lon.
+
+2.2. Upload data
+- Vao Kaggle -> Datasets -> New Dataset.
+- Tao dataset ten: snformer-data.
+- Upload cac folder video dataset that.
+
+2.3. Tao notebook
+- Vao Kaggle -> Code -> New Notebook.
+- Add Data:
+  - them snformer-code
+  - them snformer-data
+
+
+3. Bat GPU cho Kaggle Notebook
+
+Trong panel Settings cua notebook:
+- Accelerator: chon GPU T4, P100, T4 x2, L4 hoac A100 neu co.
+- Internet: bat neu can pip install dependency.
+- Persistence: luu y /kaggle/input la read-only, /kaggle/working la noi ghi output.
+
+
+4. Cell 1 - Kiem tra moi truong GPU
+
+Chay cell nay trong Kaggle Notebook:
+
+```python
+import os
+import torch
+
+print("torch:", torch.__version__)
+print("cuda:", torch.cuda.is_available())
+print("device_count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("gpu:", torch.cuda.get_device_name(0))
+print("cpu_count:", os.cpu_count())
+```
+
+Chay them:
+
+```bash
+!nvidia-smi
+```
+
+
+5. Cell 2 - Copy source code sang /kaggle/working
+
+Kaggle dataset trong /kaggle/input la read-only, nen phai copy code sang /kaggle/working truoc khi train.
+
+Neu dataset code cua ban co cau truc:
+  /kaggle/input/snformer-code/README.md
+thi dung CODE_SRC nhu ben duoi.
+
+Neu dataset code cua ban co cau truc:
+  /kaggle/input/snformer-code/SnFormer-VNICT2026/README.md
+thi doi CODE_SRC thanh:
+  Path("/kaggle/input/snformer-code/SnFormer-VNICT2026")
+
+```python
+from pathlib import Path
+import shutil
+import os
+
+CODE_SRC = Path("/kaggle/input/snformer-code")
+WORK = Path("/kaggle/working/SnFormer-VNICT2026")
+
+if WORK.exists():
+    shutil.rmtree(WORK)
+
+shutil.copytree(
+    CODE_SRC,
+    WORK,
+    ignore=shutil.ignore_patterns(
+        ".git",
+        ".venv",
+        "__pycache__",
+        "checkpoints",
+        "results",
+    ),
+)
+
+os.chdir(WORK)
+print("cwd:", os.getcwd())
+```
+
+
+6. Cell 3 - Cai dependencies
+
+Kaggle thuong da co PyTorch GPU. Khong nen cai lai torch/torchvision tu requirements.txt vi co the lam mat ban GPU.
+
+```bash
+!grep -vE '^(torch|torchvision)' requirements.txt > /tmp/req-kaggle.txt
+!python -m pip install -q -r /tmp/req-kaggle.txt
+```
+
+Kiem tra OpenCV:
+
+```python
+import cv2
+print("cv2:", cv2.__version__)
+```
+
+
+7. Cell 4 - Tao manifest CSV tu dataset tren Kaggle
+
+Sua DATA_ROOT neu slug dataset cua ban khac snformer-data.
+
+```python
+from pathlib import Path
+import csv
+from collections import Counter
+
+DATA_ROOT = Path("/kaggle/input/snformer-data")
+OUT = Path("data/kaggle_manifest.csv")
+OUT.parent.mkdir(exist_ok=True)
+
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+
+def label_for(path: Path):
+    s = str(path).lower()
+    if "celeb-real" in s or "youtube-real" in s:
+        return 0
+    if (
+        "celeb-synthesis" in s
+        or "deepfaketimit" in s
+        or "deepfakes_v1" in s
+        or "deepfakes_v4" in s
+        or "higher_quality" in s
+        or "lower_quality" in s
+    ):
+        return 1
+    return None
+
+rows = []
+for p in DATA_ROOT.rglob("*"):
+    if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
+        label = label_for(p)
+        if label is not None:
+            rows.append((str(p), label, ""))
+
+rows.sort()
+
+with OUT.open("w", newline="", encoding="utf-8") as f:
+    w = csv.writer(f)
+    w.writerow(["path", "label", "text"])
+    w.writerows(rows)
+
+print("manifest:", OUT)
+print("total:", len(rows))
+print("labels:", Counter(r[1] for r in rows))
+```
+
+
+8. Cell 5 - Smoke test pipeline bang du lieu that
+
+Chay truoc cau hinh nho de kiem tra:
+- video loader
+- GPU
+- stage 1/2/3
+- ghi checkpoint va results
+
+```bash
+!python train/trainer.py \
+  --stage 0 \
+  --data-csv data/kaggle_manifest.csv \
+  --max-samples 256 \
+  --epochs 3 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --num-frames 4 \
+  --seq-len 64
+```
+
+Neu bi CUDA out of memory:
+- giam --batch-size xuong 4 hoac 2
+- giam --num-frames xuong 2
+- giu --num-workers 2 hoac 0
+
+
+9. Cell 6 - Training lon hon tren GPU
+
+Cho GPU T4/P100, bat dau voi:
+
+```bash
+!python train/trainer.py \
+  --stage 0 \
+  --data-csv data/kaggle_manifest.csv \
+  --epochs 10 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --num-frames 8 \
+  --seq-len 128
+```
+
+Cho GPU manh hon nhu A100/L4 Highmem:
+
+```bash
+!python train/trainer.py \
+  --stage 0 \
+  --data-csv data/kaggle_manifest.csv \
+  --epochs 20 \
+  --batch-size 16 \
+  --num-workers 4 \
+  --num-frames 8 \
+  --seq-len 128
+```
+
+Khong them --cpu. Trainer se tu dung CUDA neu Kaggle co GPU.
+
+
+10. Cell 7 - Testing va benchmark
+
+```bash
+!python -m pytest tests/test_smoke.py -q
+!python benchmark/run_benchmark.py --num-frames 8 --iters 50
+```
+
+Neu benchmark cham hoac timeout:
+
+```bash
+!python benchmark/run_benchmark.py --num-frames 4 --iters 20
+```
+
+
+11. Cell 8 - Xem nhanh ket qua
+
+```bash
+!cat results/training_history.json
+!cat results/benchmark_results.json
+!ls -lh checkpoints results
+```
+
+
+12. Cell 9 - Tao file TXT tom tat tren Kaggle
+
+Neu muon tao TXT tom tat nhanh:
+
+```bash
+!python - <<'PY'
+import json
+from pathlib import Path
+
+history = json.loads(Path("results/training_history.json").read_text())
+bench = json.loads(Path("results/benchmark_results.json").read_text())
+
+lines = []
+lines.append("SFORMER / SNFORMER KAGGLE RUN SUMMARY")
+lines.append("")
+lines.append("Training History")
+for stage, rows in history.items():
+    lines.append("")
+    lines.append(stage)
+    lines.append("epoch | loss | val_loss | val_acc")
+    for r in rows:
+        lines.append(f"{r['epoch']} | {r['loss']} | {r['val_loss']} | {r['val_acc']}")
+
+lines.append("")
+lines.append("Latency")
+for name, row in bench.get("latency", {}).items():
+    lines.append(
+        f"{name}: {row['latency_ms']} ms/call, "
+        f"{row['latency_per_frame']} ms/frame, "
+        f"{row['fps']} FPS, params={row['params_M']}M"
+    )
+
+Path("results/kaggle_run_summary.txt").write_text("\n".join(lines), encoding="utf-8")
+print("saved: results/kaggle_run_summary.txt")
+PY
+```
+
+
+13. Cell 10 - Dong goi ket qua de tai ve
+
+```bash
+!zip -r snformer_kaggle_outputs.zip checkpoints results data/kaggle_manifest.csv
+!ls -lh snformer_kaggle_outputs.zip
+```
+
+Sau khi notebook chay xong:
+- Bam Save Version.
+- Doi Kaggle run xong.
+- Vao tab Output.
+- Tai file snformer_kaggle_outputs.zip.
+
+
+14. Goi y cau hinh theo tai nguyen
+
+CPU only:
+```bash
+!python train/trainer.py --stage 0 --data-csv data/kaggle_manifest.csv --max-samples 64 --epochs 3 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --cpu
+```
+
+GPU T4/P100 smoke:
+```bash
+!python train/trainer.py --stage 0 --data-csv data/kaggle_manifest.csv --max-samples 256 --epochs 3 --batch-size 8 --num-workers 2 --num-frames 4 --seq-len 64
+```
+
+GPU T4/P100 medium:
+```bash
+!python train/trainer.py --stage 0 --data-csv data/kaggle_manifest.csv --epochs 10 --batch-size 8 --num-workers 2 --num-frames 8 --seq-len 128
+```
+
+GPU A100/L4 larger:
+```bash
+!python train/trainer.py --stage 0 --data-csv data/kaggle_manifest.csv --epochs 20 --batch-size 16 --num-workers 4 --num-frames 8 --seq-len 128
+```
+
+
+15. Loi thuong gap
+
+Loi: No module named cv2
+- Chay:
+  !python -m pip install -q opencv-python-headless
+
+Loi: CUDA out of memory
+- Giam batch size.
+- Giam num_frames.
+- Dung max_samples de test truoc.
+
+Loi: Khong ghi duoc file trong /kaggle/input
+- /kaggle/input la read-only.
+- Copy code sang /kaggle/working va ghi output trong /kaggle/working.
+
+Loi: CSV manifest khong co sample
+- Kiem tra DATA_ROOT co dung slug dataset khong.
+- Chay:
+  !find /kaggle/input/snformer-data -maxdepth 3 -type d | head -50
+
+Loi: Kaggle notebook restart mat file
+- File trong /kaggle/working chi duoc giu neu Save Version thanh cong.
+- Luon zip checkpoints/results truoc khi ket thuc.

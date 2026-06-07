@@ -1,0 +1,38 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+.env
+
+# Checkpoints & results
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.tflite
+results/*.json
+results/*.log
+
+# Data (download separately)
+data/raw/
+data/processed/
+data/*.csv
+train/real/
+train/fake/
+train/test/
+train/DeepfakeTIMIT/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp

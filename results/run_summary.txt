@@ -1,0 +1,88 @@
+SFORMER / SNFORMER CPU RUN SUMMARY
+Generated: 2026-06-07
+
+Input / Outputs
+- Training history: results/training_history.json
+- Benchmark output: results/benchmark_trained_cpu.json
+- Stage 2 log: results/stage2_cpu.log
+- Stage 3 log: results/stage3_cpu.log
+- Benchmark log: results/benchmark_cpu.log
+
+Run Profile
+- Device: CPU
+- Dataset root: train/
+- Stage 1 was already trained on 2000 real + 300 fake samples.
+- Stage 2 command profile: 1000 real + 200 fake, epochs=2 (trainer runs 1 distill epoch), batch_size=2, num_frames=2, seq_len=64, prune_ratio=0.2.
+- Stage 3 command profile: 800 real + 160 fake, epochs=2, batch_size=2, num_frames=2, seq_len=64.
+- Final test/inference: train/test, 300 unlabeled samples.
+- Benchmark profile: batch=1, num_frames=2, seq_len=64, warmup=1, iters=5, CPU.
+- Benchmark accuracy values are mock metrics from benchmark/run_benchmark.py; test accuracy cannot be computed because train/test is unlabeled.
+
+Training Results
+
+Stage 1: Pretrain Sformer-Full
+Epoch | Loss   | Val Loss | Val Acc
+1     | 0.6949 | 0.6451   | 0.8696
+2     | 0.6841 | 0.7141   | 0.8696
+3     | 0.6804 | 0.6999   | 0.8696
+4     | 0.6767 | 0.6515   | 0.8696
+5     | 0.6559 | 0.6820   | 0.8696
+
+Stage 2: Structured Pruning + Knowledge Distillation
+Epoch | Loss   | Val Loss | Val Acc
+1     | 1.9394 | 0.8338   | 0.8333
+
+Stage 3: Quantization-Aware Training
+Epoch | Loss   | Val Loss | Val Acc
+1     | 0.6781 | 0.6338   | 0.8333
+2     | 0.6359 | 0.6318   | 0.8333
+
+Final Test / Inference
+- Samples: 300
+- Labeled samples: 0
+- Predicted real: 300
+- Predicted fake: 0
+- Fake rate: 0.0000
+- Note: train/test has no real/fake labels, so this is prediction distribution only.
+
+Saved Checkpoints
+- checkpoints/sformer_stage1.pt
+- checkpoints/snformer_stage2.pt
+- checkpoints/snformer_stage3_qat.pt
+
+Checkpoint Load Status In Benchmark
+Model             | Loaded | Missing Keys | Unexpected Keys
+Sformer           | yes    | 0            | 0
+SnFormer-Compact  | yes    | 0            | 0
+SnFormer-QAT      | yes    | 0            | 0
+
+Benchmark Accuracy Metrics (Mock)
+Model             | Accuracy | F1     | AUC
+Sformer           | 100.0%   | 1.0000 | 1.0000
+SnFormer-Compact  | 100.0%   | 1.0000 | 1.0000
+
+Benchmark Latency
+Model             | ms/call | ms/frame | FPS  | Params | FLOPs
+Sformer           | 87.15   | 43.57    | 23.0 | 6.45M  | 0.606G
+SnFormer-Compact  | 79.67   | 39.84    | 25.1 | 4.37M  | 0.603G
+SnFormer-QAT      | 650.91  | 325.46   | 3.1  | 4.37M  | 0.000G
+
+Ablation Study
+Configuration                 | Acc   | Delta | ms/call | ms/frame | FPS  | Params | FLOPs
+Sformer-Full                  | 96.5% | +0.0% | 70.37   | 35.18    | 28.4 | 6.45M  | 0.606G
+w/o FFT Layer                 | 94.8% | -1.7% | 57.81   | 28.91    | 34.6 | 6.45M  | 0.605G
+w/o BiLSTM (TCN instead)      | 95.1% | -1.4% | 69.95   | 34.98    | 28.6 | 6.25M  | 0.605G
+w/o Transformer (0 ViT)       | 93.1% | -3.4% | 64.44   | 32.22    | 31.0 | 5.39M  | 0.604G
+SnFormer-Compact              | 93.8% | -2.7% | 61.55   | 30.78    | 32.5 | 4.37M  | 0.603G
+
+Mobile Deployment Reference
+Model                    | Latency | FPS  | RAM   | Accuracy
+MobileNet+FFT [2]        | 35 ms   | 28.6 | 420MB | 94.20%
+SFTNet [10]              | 52 ms   | 19.2 | 580MB | 93.44%
+Shallow ViT [5]          | 28 ms   | 35.7 | 380MB | 90.94%
+Sformer-Lite             | 120 ms  | 8.3  | 980MB | 94.80%
+SnFormer-Compact INT8    | 65 ms   | 15.4 | 680MB | 93.80%
+
+Notes
+- Stage 3 QAT checkpoint is much slower on this CPU before backend-specific INT8 conversion/deployment optimization.
+- QAT runs emitted a PyTorch observer reduce_range deprecation warning; training and benchmark completed successfully.

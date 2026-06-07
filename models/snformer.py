@@ -47,7 +47,6 @@ class SnFormer(Sformer):
         self._head_importance: dict[str, torch.Tensor] = {}
 
     # ── Structured Pruning ─────────────────────────────────────────────────────
-    @torch.no_grad()
     def compute_head_importance(self, dataloader, device: str = "cpu", n_batches: int = 32):
         """
         Tính importance score cho từng attention head bằng gradient magnitude [3].
@@ -59,12 +58,18 @@ class SnFormer(Sformer):
         for i, batch in enumerate(dataloader):
             if i >= n_batches:
                 break
-            frames = batch["frames"].to(device)
-            ids    = batch["input_ids"].to(device)
-            mask   = batch.get("text_mask", None)
+            if isinstance(batch, dict):
+                frames = batch["frames"].to(device)
+                ids    = batch["input_ids"].to(device)
+                mask   = batch.get("text_mask", None)
+                labels = batch["label"].to(device)
+            else:
+                frames, ids, mask, labels = batch
+                frames = frames.to(device)
+                ids    = ids.to(device)
+                labels = labels.to(device)
             if mask is not None:
                 mask = mask.to(device)
-            labels = batch["label"].to(device)
 
             out  = self(frames, ids, mask)
             loss = self.compute_loss(out, labels)["total"]
@@ -101,13 +106,13 @@ class SnFormer(Sformer):
                 continue
             imp = self._head_importance[name]               # (num_heads,)
             n_prune = max(1, int(len(imp) * prune_ratio))
-            keep_idx = imp.argsort(descending=True)[n_prune:]
+            prune_idx = set(imp.argsort(descending=False)[:n_prune].tolist())
 
             # Zero out pruned heads trong QKV weight
             H, D = module.num_heads, module.head_dim
             with torch.no_grad():
                 for h_idx in range(H):
-                    if h_idx not in keep_idx:
+                    if h_idx in prune_idx:
                         for part in range(3):
                             sl = slice(part * H * D + h_idx * D,
                                        part * H * D + (h_idx + 1) * D)
@@ -144,8 +149,15 @@ class SnFormer(Sformer):
         l_kl = F.kl_div(s_soft, t_soft, reduction="batchmean") * (temperature ** 2)
 
         # Intermediate feature distillation (L2)
-        l_feat = F.mse_loss(student_out["video_feat"], teacher_out["video_feat"].detach()) \
-               + F.mse_loss(student_out["text_feat"],  teacher_out["text_feat"].detach())
+        video_dim = min(student_out["video_feat"].shape[-1], teacher_out["video_feat"].shape[-1])
+        text_dim = min(student_out["text_feat"].shape[-1], teacher_out["text_feat"].shape[-1])
+        l_feat = F.mse_loss(
+            student_out["video_feat"][..., :video_dim],
+            teacher_out["video_feat"][..., :video_dim].detach(),
+        ) + F.mse_loss(
+            student_out["text_feat"][..., :text_dim],
+            teacher_out["text_feat"][..., :text_dim].detach(),
+        )
 
         # L1 regularization (thúc đẩy sparsity)
         l_reg = sum(p.abs().mean() for p in self.parameters() if p.requires_grad) * lambda2

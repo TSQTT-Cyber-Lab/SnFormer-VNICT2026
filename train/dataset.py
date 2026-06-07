@@ -16,13 +16,11 @@ Yêu cầu:
 from __future__ import annotations
 
 import csv
-import os
 import random
 from pathlib import Path
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
@@ -305,6 +303,56 @@ def _samples_from_test_folder(data_dir: str) -> list[tuple[str, int, str]]:
     return samples
 
 
+def _limit_samples_per_class(
+    samples: list[tuple[str, int, str]],
+    rng: random.Random,
+    max_real_samples: Optional[int] = None,
+    max_fake_samples: Optional[int] = None,
+) -> list[tuple[str, int, str]]:
+    """Lấy ngẫu nhiên tối đa N mẫu theo từng class để train nhẹ hơn."""
+    limits = {0: max_real_samples, 1: max_fake_samples}
+    limited: list[tuple[str, int, str]] = []
+
+    for label in (0, 1):
+        class_samples = [sample for sample in samples if sample[1] == label]
+        limit = limits[label]
+        if limit is not None and limit > 0 and len(class_samples) > limit:
+            class_samples = rng.sample(class_samples, limit)
+        limited.extend(class_samples)
+        name = "real" if label == 0 else "fake"
+        print(f"  Using {len(class_samples)} {name} samples")
+
+    other_samples = [sample for sample in samples if sample[1] not in (0, 1)]
+    limited.extend(other_samples)
+    return limited
+
+
+def _split_train_val(
+    samples: list[tuple[str, int, str]],
+    val_split: float,
+    rng: random.Random,
+) -> tuple[list[tuple[str, int, str]], list[tuple[str, int, str]]]:
+    """Stratified split theo label để tập nhỏ không lệch class quá mạnh."""
+    train_s: list[tuple[str, int, str]] = []
+    val_s: list[tuple[str, int, str]] = []
+
+    labels = sorted({sample[1] for sample in samples})
+    for label in labels:
+        class_samples = [sample for sample in samples if sample[1] == label]
+        rng.shuffle(class_samples)
+        if len(class_samples) <= 1:
+            train_s.extend(class_samples)
+            continue
+        n_val = max(1, int(len(class_samples) * val_split))
+        n_val = min(n_val, len(class_samples) - 1)
+        val_s.extend(class_samples[:n_val])
+        train_s.extend(class_samples[n_val:])
+
+    rng.shuffle(train_s)
+    rng.shuffle(val_s)
+    return train_s, val_s
+
+
 def build_dataloader(
     data_dir:   Optional[str] = None,
     csv_path:   Optional[str] = None,
@@ -317,6 +365,8 @@ def build_dataloader(
     val_split:  float = 0.1,
     seed:       int   = 42,
     max_samples: Optional[int] = None,
+    max_real_samples: Optional[int] = None,
+    max_fake_samples: Optional[int] = None,
 ) -> tuple[DataLoader, DataLoader]:
     """
     Tạo (train_loader, val_loader) từ:
@@ -337,15 +387,19 @@ def build_dataloader(
         raise RuntimeError("Không tìm thấy sample nào trong dataset")
 
     rng = random.Random(seed)
+    samples = _limit_samples_per_class(
+        samples,
+        rng,
+        max_real_samples=max_real_samples,
+        max_fake_samples=max_fake_samples,
+    )
     rng.shuffle(samples)
     if max_samples is not None:
         if max_samples < 2:
             raise ValueError("max_samples phải >= 2 để tạo train/val split")
         samples = samples[:max_samples]
 
-    n_val   = max(1, int(len(samples) * val_split))
-    val_s   = samples[:n_val]
-    train_s = samples[n_val:]
+    train_s, val_s = _split_train_val(samples, val_split, rng)
 
     print(f"  Dataset: {len(train_s)} train / {len(val_s)} val samples")
 

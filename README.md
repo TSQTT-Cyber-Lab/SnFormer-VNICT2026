@@ -111,30 +111,25 @@ python benchmark/run_benchmark.py --num-frames 8 --iters 100
 
 ```bash
 # Demo/debug không cần dataset thực
-python train/trainer.py --stage 1 --dummy --epochs 5 --lr 1e-4
+python train/trainer.py --stage 1 --dummy --epochs 1 --batch-size 2 --num-frames 1 --seq-len 32 --cpu
 
-# Stage 1: Pretrain Sformer-Full với dataset thật
-python train/trainer.py --stage 1 --data-dir data/raw --epochs 30 --lr 1e-4
-# hoặc:
-python train/trainer.py --stage 1 --data-csv data/train.csv --epochs 30 --lr 1e-4
+# Smoke test nhanh bằng dữ liệu thật trên CPU
+python train/trainer.py --stage 1 --epochs 1 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 64 --max-fake-samples 32 --cpu --skip-test
 
-# Dataset thật đang nằm trong các subfolder train/ của repo này
-python train/trainer.py --stage 0 --data-csv data/train_subfolders_manifest.csv --epochs 30 --lr 1e-4
+# Stage 1: Pretrain Sformer-Full trên CPU i7/16GB
+python train/trainer.py --stage 1 --epochs 5 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --max-real-samples 2000 --max-fake-samples 300 --cpu
 
-# Smoke test toàn pipeline bằng dữ liệu thật trên CPU
-python train/trainer.py --stage 0 --data-csv data/train_subfolders_manifest.csv --max-samples 16 --epochs 2 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --cpu
+# Stage 2: Structured Pruning + Knowledge Distillation nhẹ
+python train/trainer.py --stage 2 --epochs 2 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --max-real-samples 1000 --max-fake-samples 200 --prune-ratio 0.2 --cpu --skip-test
 
-# Stage 2: Structured Pruning + Knowledge Distillation
-python train/trainer.py --stage 2 --data-dir data/raw --epochs 15 --prune-ratio 0.3
+# Stage 3: QAT INT8 nhẹ
+python train/trainer.py --stage 3 --epochs 2 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --max-real-samples 800 --max-fake-samples 160 --cpu --skip-test
 
-# Stage 3: QAT INT8
-python train/trainer.py --stage 3 --data-dir data/raw --epochs 5
-
-# Hoặc chạy toàn bộ pipeline với dataset thật
-python train/trainer.py --stage 0 --data-dir data/raw --epochs 30
+# Stage 0 chạy toàn pipeline, chỉ nên smoke test trên CPU
+python train/trainer.py --stage 0 --epochs 2 --batch-size 1 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 64 --max-fake-samples 32 --prune-ratio 0.1 --cpu --skip-test
 ```
 
-`trainer.py` luôn yêu cầu một trong ba lựa chọn: `--data-dir`, `--data-csv`, hoặc `--dummy`.
+Nếu không truyền `--data-dir` hoặc `--data-csv`, `trainer.py` mặc định dùng `train/`.
 
 ---
 

@@ -7,6 +7,9 @@ Giai đoạn 3: QAT (INT8)
 Giai đoạn 4: Deployment Tuning (benchmark trực tiếp)
 
 Chạy với dataset thực:
+  python train/trainer.py --stage 1
+  # mặc định dùng 2000 real + 300 fake trong train/ để train/val
+  # và dùng train/test để đánh giá/inference
   python train/trainer.py --stage 1 --data-dir /path/to/dataset
   python train/trainer.py --stage 1 --data-csv /path/to/manifest.csv
 
@@ -23,6 +26,8 @@ from typing import Optional, Tuple
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+
+DEFAULT_DATA_DIR = Path(__file__).resolve().parent
 
 
 # ─── Dummy DataLoader (giữ lại để debug / CI) ─────────────────────────────────
@@ -53,6 +58,8 @@ def build_dataloader(
     augment:     bool = False,
     val_split:   float = 0.1,
     max_samples: Optional[int] = None,
+    max_real_samples: Optional[int] = None,
+    max_fake_samples: Optional[int] = None,
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Tạo (train_loader, val_loader) từ dataset thực.
@@ -66,6 +73,8 @@ def build_dataloader(
         num_workers: số worker DataLoader
         augment    : bật RandomCrop / ColorJitter cho train split
         val_split  : tỉ lệ validation (default 10%)
+        max_real_samples: giới hạn số mẫu real lấy ngẫu nhiên
+        max_fake_samples: giới hạn số mẫu fake lấy ngẫu nhiên
 
     Returns:
         (train_loader, val_loader)
@@ -84,7 +93,25 @@ def build_dataloader(
         augment=augment,
         val_split=val_split,
         max_samples=max_samples,
+        max_real_samples=max_real_samples,
+        max_fake_samples=max_fake_samples,
     )
+
+
+def _sample_limit(value: int) -> Optional[int]:
+    """CLI dùng 0 để tắt giới hạn class."""
+    return None if value <= 0 else value
+
+
+def _load_training_history(path: str = "results/training_history.json") -> dict:
+    history_path = Path(path)
+    if not history_path.exists():
+        return {}
+    try:
+        with open(history_path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 # ─── Shared validation loop ────────────────────────────────────────────────────
@@ -105,6 +132,68 @@ def evaluate(model, loader: DataLoader, device: str) -> dict:
         "val_loss": round(total_loss / max(len(loader), 1), 4),
         "val_acc":  round(correct / max(n, 1), 4),
     }
+
+
+def _slice_batch_outputs(outputs: dict, keep_mask: torch.Tensor) -> dict:
+    """Lọc output theo batch mask để compute_loss chỉ chạy trên sample có nhãn."""
+    sliced = {}
+    batch_size = keep_mask.shape[0]
+    for key, value in outputs.items():
+        if torch.is_tensor(value) and value.shape[:1] == (batch_size,):
+            sliced[key] = value[keep_mask]
+        else:
+            sliced[key] = value
+    return sliced
+
+
+@torch.no_grad()
+def evaluate_test(model, loader: DataLoader, device: str) -> dict:
+    """
+    Đánh giá test loader.
+
+    Nếu test/ có nhãn (test/real, test/fake), trả thêm test_loss/test_acc.
+    Nếu test/ dạng flat không nhãn, chỉ trả phân bố dự đoán.
+    """
+    model.eval().to(device)
+    total_loss, correct, labeled_n = 0.0, 0, 0
+    total_n, pred_fake, pred_real = 0, 0, 0
+    loss_batches = 0
+
+    for batch in loader:
+        frames, ids, mask, labels = [b.to(device) for b in batch]
+        out = model(frames, ids, mask)
+        logits = out["fusion_logit"].squeeze(-1)
+        probs = torch.sigmoid(logits)
+        preds = (probs > 0.5).long()
+
+        total_n += labels.size(0)
+        pred_fake += (preds == 1).sum().item()
+        pred_real += (preds == 0).sum().item()
+
+        labeled_mask = labels >= 0
+        if labeled_mask.any():
+            labeled_labels = labels[labeled_mask]
+            labeled_outputs = _slice_batch_outputs(out, labeled_mask)
+            loss = model.compute_loss(labeled_outputs, labeled_labels)["total"]
+            total_loss += loss.item()
+            loss_batches += 1
+            correct += (preds[labeled_mask] == labeled_labels).sum().item()
+            labeled_n += labeled_labels.size(0)
+
+    metrics = {
+        "n_samples": total_n,
+        "n_labeled": labeled_n,
+        "n_unlabeled": total_n - labeled_n,
+        "pred_real": pred_real,
+        "pred_fake": pred_fake,
+        "fake_rate": round(pred_fake / max(total_n, 1), 4),
+    }
+    if labeled_n > 0:
+        metrics.update({
+            "test_loss": round(total_loss / max(loss_batches, 1), 4),
+            "test_acc": round(correct / labeled_n, 4),
+        })
+    return metrics
 
 
 # ─── Stage 1: Pretrain Sformer-Full ───────────────────────────────────────────
@@ -290,6 +379,11 @@ def main(args):
     print(f"\nSformer/SnFormer Training Pipeline")
     print(f"Device: {device.upper()} | Stage: {args.stage}")
 
+    data_dir = args.data_dir
+    if not args.dummy and not args.data_csv and data_dir is None:
+        data_dir = str(DEFAULT_DATA_DIR)
+        print(f"Dataset mặc định: {data_dir}")
+
     # ── Chọn DataLoader ──────────────────────────────────────────────────────
     if args.dummy:
         print("  [DUMMY MODE] Dùng random tensor — không cần dataset thực")
@@ -301,13 +395,13 @@ def main(args):
         )
         train_loader = val_loader = _loader   # dùng chung khi demo
     else:
-        if not (args.data_dir or args.data_csv):
+        if not (data_dir or args.data_csv):
             raise ValueError(
                 "Phải truyền --data-dir hoặc --data-csv "
                 "(hoặc dùng --dummy để chạy demo)"
             )
         train_loader, val_loader = build_dataloader(
-            data_dir=args.data_dir,
+            data_dir=data_dir,
             csv_path=args.data_csv,
             num_frames=args.num_frames,
             seq_len=args.seq_len,
@@ -315,9 +409,11 @@ def main(args):
             num_workers=args.num_workers,
             augment=(args.stage in (1, 0)),   # augment chỉ ở stage 1
             max_samples=args.max_samples,
+            max_real_samples=_sample_limit(args.max_real_samples),
+            max_fake_samples=_sample_limit(args.max_fake_samples),
         )
 
-    all_history = {}
+    all_history = _load_training_history()
 
     if args.stage in (1, 0):
         model = Sformer(pretrained=False)
@@ -357,11 +453,11 @@ def main(args):
         )
         all_history["stage3"] = h
 
-    # ── Test set evaluation (nếu có test/ folder) ───────────────────────────
-    if args.data_dir and not args.dummy:
+    # ── Test set evaluation (train/test nếu có) ─────────────────────────────
+    if data_dir and not args.dummy and not args.skip_test:
         from train.dataset import build_test_loader
         test_loader = build_test_loader(
-            data_dir=args.data_dir,
+            data_dir=data_dir,
             num_frames=args.num_frames,
             seq_len=args.seq_len,
             batch_size=args.batch_size,
@@ -388,8 +484,22 @@ def main(args):
                 eval_model = None
 
             if eval_model is not None:
-                test_metrics = evaluate(eval_model, test_loader, device)
-                print(f"\n  Test set → loss={test_metrics['val_loss']:.4f} | acc={test_metrics['val_acc']:.4f}")
+                test_metrics = evaluate_test(eval_model, test_loader, device)
+                print(
+                    "\n  Test set → "
+                    f"samples={test_metrics['n_samples']} | "
+                    f"pred_real={test_metrics['pred_real']} | "
+                    f"pred_fake={test_metrics['pred_fake']} | "
+                    f"fake_rate={test_metrics['fake_rate']:.4f}"
+                )
+                if test_metrics["n_labeled"] > 0:
+                    print(
+                        "             "
+                        f"loss={test_metrics['test_loss']:.4f} | "
+                        f"acc={test_metrics['test_acc']:.4f}"
+                    )
+                else:
+                    print("             test/ không có nhãn real/fake, chỉ xuất thống kê dự đoán")
                 all_history["test"] = test_metrics
 
     os.makedirs("results", exist_ok=True)
@@ -408,7 +518,7 @@ if __name__ == "__main__":
     # Dataset — chọn 1 trong 3 (mutually exclusive)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--data-dir",  type=str, default=None,
-                       help="Folder dataset: data_dir/{real,fake}/...")
+                       help="Folder dataset: data_dir/{real,fake,test}/...; mặc định là train/")
     group.add_argument("--data-csv",  type=str, default=None,
                        help="CSV manifest: cột path,label[,text]")
     group.add_argument("--dummy",     action="store_true",
@@ -423,6 +533,12 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int,   default=4)
     parser.add_argument("--max-samples", type=int,   default=None,
                         help="Giới hạn số sample để smoke test/debug với dataset thật")
+    parser.add_argument("--max-real-samples", type=int, default=2000,
+                        help="Số mẫu real lấy ngẫu nhiên để train/val; 0 = dùng toàn bộ")
+    parser.add_argument("--max-fake-samples", type=int, default=300,
+                        help="Số mẫu fake lấy ngẫu nhiên để train/val; 0 = dùng toàn bộ")
+    parser.add_argument("--skip-test",    action="store_true",
+                        help="Bỏ qua đánh giá/inference trên data_dir/test")
     # Legacy — chỉ dùng với --dummy
     parser.add_argument("--n-samples",   type=int,   default=64,
                         help="Số sample trong dummy dataset")

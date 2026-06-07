@@ -22,6 +22,49 @@ import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 
+def load_json(path: str):
+    p = Path(path)
+    if not p.exists():
+        return None
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def summarize_training_history(history: dict | None) -> dict:
+    if not history:
+        return {}
+
+    summary = {}
+    for stage_name, entries in history.items():
+        if isinstance(entries, list) and entries:
+            summary[stage_name] = entries[-1]
+        elif isinstance(entries, dict):
+            summary[stage_name] = entries
+    return summary
+
+
+def load_checkpoint(model, checkpoint_path: str, device: str, model_name: str) -> dict:
+    p = Path(checkpoint_path)
+    status = {"path": str(p), "loaded": False}
+    if not p.exists():
+        status["error"] = "checkpoint not found"
+        return status
+
+    try:
+        state = torch.load(p, map_location=device)
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        status.update({
+            "loaded": True,
+            "missing_keys": len(missing),
+            "unexpected_keys": len(unexpected),
+        })
+        print(f"  Loaded {model_name} checkpoint: {p}")
+    except Exception as exc:
+        status["error"] = str(exc)
+        print(f"  Could not load {model_name} checkpoint {p}: {exc}")
+    return status
+
+
 # ─── Mock dataset để chạy offline không cần download ──────────────────────────
 def make_mock_batch(batch_size=4, num_frames=8, seq_len=128, device="cpu"):
     frames    = torch.randn(batch_size, num_frames, 3, 224, 224, device=device)
@@ -125,6 +168,17 @@ def main(args):
 
     results = {}
 
+    # ── 0. Trained/test summary ─────────────────────────────────────────────
+    print("\n[0/4] Trained/Test Results Summary")
+    training_history = load_json(args.training_history)
+    trained_eval = summarize_training_history(training_history)
+    if trained_eval:
+        for name, values in trained_eval.items():
+            print(f"  {name}: {values}")
+    else:
+        print(f"  No training history found at {args.training_history}")
+    results["trained_eval"] = trained_eval
+
     # ── 1. Accuracy metrics (mock) ───────────────────────────────────────────
     print("\n[1/4] Accuracy Metrics (mock predictions)")
     print("  ※ Thay mock_predictions() bằng inference thực trên Celeb-DF v2 / DFDC")
@@ -140,10 +194,29 @@ def main(args):
     # ── 2. Latency benchmark ─────────────────────────────────────────────────
     print(f"\n[2/4] Latency Benchmark @ batch=1, T={args.num_frames} frames, device={device}")
     lat_results = {}
+    snformer_qat = SnFormer(pretrained=False)
+    try:
+        snformer_qat.prepare_qat()
+    except Exception as exc:
+        print(f"  QAT prepare skipped for benchmark model: {exc}")
     models_to_bench = {
         "Sformer":          Sformer(pretrained=False),
         "SnFormer-Compact": SnFormer(pretrained=False),
+        "SnFormer-QAT":     snformer_qat,
     }
+    checkpoint_status = {
+        "Sformer": load_checkpoint(
+            models_to_bench["Sformer"], args.sformer_checkpoint, device, "Sformer"
+        ),
+        "SnFormer-Compact": load_checkpoint(
+            models_to_bench["SnFormer-Compact"], args.snformer_checkpoint, device, "SnFormer-Compact"
+        ),
+        "SnFormer-QAT": load_checkpoint(
+            models_to_bench["SnFormer-QAT"], args.qat_checkpoint, device, "SnFormer-QAT"
+        ),
+    }
+    results["checkpoints"] = checkpoint_status
+
     for name, model in models_to_bench.items():
         lat = measure_latency(
             model, batch_size=1, num_frames=args.num_frames,
@@ -227,5 +300,9 @@ if __name__ == "__main__":
     parser.add_argument("--warmup",     type=int, default=5,     help="Warmup iterations")
     parser.add_argument("--cpu",        action="store_true",     help="Force CPU")
     parser.add_argument("--output",     type=str, default="results/benchmark_results.json")
+    parser.add_argument("--training-history", type=str, default="results/training_history.json")
+    parser.add_argument("--sformer-checkpoint", type=str, default="checkpoints/sformer_stage1.pt")
+    parser.add_argument("--snformer-checkpoint", type=str, default="checkpoints/snformer_stage2.pt")
+    parser.add_argument("--qat-checkpoint", type=str, default="checkpoints/snformer_stage3_qat.pt")
     args = parser.parse_args()
     main(args)
