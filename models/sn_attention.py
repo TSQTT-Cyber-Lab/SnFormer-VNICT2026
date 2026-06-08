@@ -65,8 +65,8 @@ class SnAttention(nn.Module):
         T, D = x.shape[2], x.shape[3]
         half = D // 2
         x1, x2  = x[..., :half], x[..., half:]
-        cos = self.cos_cache[:, :, :T, :].to(x.device)
-        sin = self.sin_cache[:, :, :T, :].to(x.device)
+        cos = self.cos_cache[:, :, :T, :].to(device=x.device, dtype=x.dtype)
+        sin = self.sin_cache[:, :, :T, :].to(device=x.device, dtype=x.dtype)
         return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
@@ -83,6 +83,7 @@ class SnAttention(nn.Module):
         k = elu_feature_map(k)
 
         if mask is not None:
+            mask = mask.to(device=k.device, dtype=k.dtype)
             k = k * mask[:, None, :, None]
             v = v * mask[:, None, :, None]
 

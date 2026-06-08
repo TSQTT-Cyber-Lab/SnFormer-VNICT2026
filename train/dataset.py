@@ -16,6 +16,7 @@ Yêu cầu:
 from __future__ import annotations
 
 import csv
+import os
 import random
 from pathlib import Path
 from typing import Optional
@@ -47,6 +48,11 @@ class CharTokenizer:
 # ── Video / Image utilities ───────────────────────────────────────────────────
 VIDEO_EXTS  = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 IMAGE_EXTS  = {".jpg", ".jpeg", ".png", ".bmp"}
+
+
+def _is_kaggle() -> bool:
+    """Nhận diện Kaggle Notebook để tối ưu DataLoader/path mặc định."""
+    return bool(os.environ.get("KAGGLE_URL_BASE")) or Path("/kaggle/input").exists()
 
 
 def _load_frames_from_video(path: str, num_frames: int) -> Optional[list]:
@@ -223,6 +229,62 @@ def _samples_from_csv(csv_path: str) -> list[tuple[str, int, str]]:
     return samples
 
 
+def _find_label_dirs(root: Path, split_name: str) -> list[Path]:
+    """Tìm real/fake folder cả trực tiếp và trong cây Kaggle input lồng nhau."""
+    direct = root / split_name
+    candidates: list[Path] = []
+    if direct.exists() and direct.is_dir():
+        candidates.append(direct)
+
+    for p in root.rglob("*"):
+        if not p.is_dir() or p.name.lower() != split_name:
+            continue
+        if any(parent.name.lower() == "test" for parent in p.parents):
+            continue
+        candidates.append(p)
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for p in candidates:
+        resolved = p.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(p)
+    return unique
+
+
+def _collect_samples_in_label_dir(label_dir: Path, label: int) -> list[tuple[str, int, str]]:
+    """
+    Thu sample trong folder real/fake.
+
+    Quy ước:
+      - video file ở bất kỳ độ sâu nào là một sample
+      - ảnh nằm trực tiếp dưới real/fake là từng sample ảnh
+      - folder con chứa frame ảnh là một sample clip
+    """
+    samples: list[tuple[str, int, str]] = []
+
+    def visit(folder: Path, is_label_root: bool = False) -> None:
+        direct_images = sorted(
+            p for p in folder.iterdir()
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+        )
+        if direct_images and not is_label_root:
+            samples.append((str(folder), label, ""))
+            return
+        if direct_images and is_label_root:
+            samples.extend((str(p), label, "") for p in direct_images)
+
+        for item in sorted(folder.iterdir()):
+            if item.is_file() and item.suffix.lower() in VIDEO_EXTS:
+                samples.append((str(item), label, ""))
+            elif item.is_dir():
+                visit(item, is_label_root=False)
+
+    visit(label_dir, is_label_root=True)
+    return samples
+
+
 def _samples_from_folder(data_dir: str) -> list[tuple[str, int, str]]:
     """
     Cấu trúc folder:
@@ -238,25 +300,15 @@ def _samples_from_folder(data_dir: str) -> list[tuple[str, int, str]]:
     root = Path(data_dir)
 
     for split_name, lbl in label_map.items():
-        split_dir = root / split_name
-        if not split_dir.exists():
-            # Thử tìm tên case-insensitive
-            for p in root.iterdir():
-                if p.is_dir() and p.name.lower() == split_name:
-                    split_dir = p
-                    break
-        if not split_dir.exists():
-            continue
-
-        found = 0
-        for item in sorted(split_dir.iterdir()):
-            if item.is_dir():
-                samples.append((str(item), lbl, ""))
-                found += 1
-            elif item.suffix.lower() in VIDEO_EXTS | IMAGE_EXTS:
-                samples.append((str(item), lbl, ""))
-                found += 1
-        print(f"  Found {found} {'real' if lbl==0 else 'fake'} samples in {split_dir}")
+        found_dirs = _find_label_dirs(root, split_name)
+        found_total = 0
+        for split_dir in found_dirs:
+            found_samples = _collect_samples_in_label_dir(split_dir, lbl)
+            samples.extend(found_samples)
+            found_total += len(found_samples)
+            print(f"  Found {len(found_samples)} {'real' if lbl==0 else 'fake'} samples in {split_dir}")
+        if found_total == 0:
+            print(f"  Found 0 {'real' if lbl==0 else 'fake'} samples under {root}")
 
     return samples
 
@@ -406,8 +458,12 @@ def build_dataloader(
     train_ds = SnFormerDataset(train_s, num_frames, seq_len, augment=augment)
     val_ds   = SnFormerDataset(val_s,   num_frames, seq_len, augment=False)
 
-    # Tự điều chỉnh num_workers: spawn trên Windows cần guard, dataset nhỏ không cần worker
-    effective_workers = 0 if len(train_s) < 50 else num_workers
+    # Tự điều chỉnh num_workers: spawn trên Windows cần guard, dataset nhỏ không cần worker.
+    # Kaggle Linux/T4 chạy ổn với worker > 0 để nạp video song song.
+    effective_workers = num_workers if _is_kaggle() else (0 if len(train_s) < 50 else num_workers)
+    loader_kwargs = {}
+    if effective_workers > 0:
+        loader_kwargs["prefetch_factor"] = 2
 
     train_loader = DataLoader(
         train_ds,
@@ -417,6 +473,7 @@ def build_dataloader(
         pin_memory=torch.cuda.is_available(),
         drop_last=True,
         persistent_workers=(effective_workers > 0),
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_ds,
@@ -426,6 +483,7 @@ def build_dataloader(
         pin_memory=torch.cuda.is_available(),
         drop_last=False,
         persistent_workers=(effective_workers > 0),
+        **loader_kwargs,
     )
     return train_loader, val_loader
 
@@ -451,7 +509,10 @@ def build_test_loader(
         return None
 
     ds = SnFormerDataset(samples, num_frames, seq_len, augment=False)
-    effective_workers = 0 if len(samples) < 50 else num_workers
+    effective_workers = num_workers if _is_kaggle() else (0 if len(samples) < 50 else num_workers)
+    loader_kwargs = {}
+    if effective_workers > 0:
+        loader_kwargs["prefetch_factor"] = 2
     return DataLoader(
         ds,
         batch_size=batch_size,
@@ -460,4 +521,5 @@ def build_test_loader(
         pin_memory=torch.cuda.is_available(),
         drop_last=False,
         persistent_workers=(effective_workers > 0),
+        **loader_kwargs,
     )

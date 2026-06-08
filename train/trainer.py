@@ -18,8 +18,11 @@ Chạy với dummy data (debug / CI):
 """
 
 import argparse
+import contextlib
+import datetime as _dt
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -28,6 +31,81 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent
+
+
+def _is_kaggle() -> bool:
+    return bool(os.environ.get("KAGGLE_URL_BASE")) or Path("/kaggle/input").exists()
+
+
+def _default_data_dir() -> Path:
+    """Kaggle input là read-only; local mặc định vẫn là train/."""
+    if _is_kaggle() and Path("/kaggle/input").exists():
+        return Path("/kaggle/input")
+    return DEFAULT_DATA_DIR
+
+
+def _default_output_root() -> Path:
+    """Ghi artifact ra ngoài source tree trên Kaggle để dễ download và tránh read-only."""
+    if _is_kaggle():
+        return Path("/kaggle/working/snformer_runs")
+    return Path("runs")
+
+
+def _make_run_dir(output_dir: Optional[str], run_name: Optional[str], stage: int, overwrite: bool) -> Path:
+    root = Path(output_dir) if output_dir else _default_output_root()
+    timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = run_name or f"stage{stage}_{timestamp}"
+    run_dir = root / name
+
+    if run_dir.exists() and not overwrite:
+        suffix = 2
+        while (root / f"{name}_{suffix:02d}").exists():
+            suffix += 1
+        run_dir = root / f"{name}_{suffix:02d}"
+
+    run_dir.mkdir(parents=True, exist_ok=overwrite)
+    return run_dir
+
+
+def _copy_source_snapshot(run_dir: Path) -> None:
+    """Copy đúng 2 file train đang chạy vào run_dir để notebook Kaggle có bản lưu riêng."""
+    snapshot_dir = run_dir / "source_snapshot" / "train"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("dataset.py", "trainer.py"):
+        src = Path(__file__).resolve().parent / filename
+        shutil.copy2(src, snapshot_dir / filename)
+
+
+def _configure_t4_runtime(device: str, no_amp: bool) -> bool:
+    use_amp = device == "cuda" and not no_amp
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+    return use_amp
+
+
+def _move_batch(batch, device: str):
+    return [b.to(device, non_blocking=(device == "cuda")) for b in batch]
+
+
+def _make_grad_scaler(enabled: bool):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def _autocast(enabled: bool):
+    if not enabled:
+        return contextlib.nullcontext()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast("cuda", enabled=True)
+    return torch.cuda.amp.autocast(enabled=True)
+
+
+def _checkpoint_path(checkpoint_dir: Optional[str], filename: str) -> Path:
+    if checkpoint_dir:
+        return Path(checkpoint_dir) / filename
+    return Path(filename)
 
 
 # ─── Dummy DataLoader (giữ lại để debug / CI) ─────────────────────────────────
@@ -121,7 +199,7 @@ def evaluate(model, loader: DataLoader, device: str) -> dict:
     model.eval()
     total_loss, correct, n = 0.0, 0, 0
     for batch in loader:
-        frames, ids, mask, labels = [b.to(device) for b in batch]
+        frames, ids, mask, labels = _move_batch(batch, device)
         out  = model(frames, ids, mask)
         loss = model.compute_loss(out, labels)["total"]
         total_loss += loss.item()
@@ -160,7 +238,7 @@ def evaluate_test(model, loader: DataLoader, device: str) -> dict:
     loss_batches = 0
 
     for batch in loader:
-        frames, ids, mask, labels = [b.to(device) for b in batch]
+        frames, ids, mask, labels = _move_batch(batch, device)
         out = model(frames, ids, mask)
         logits = out["fusion_logit"].squeeze(-1)
         probs = torch.sigmoid(logits)
@@ -205,29 +283,34 @@ def stage1_pretrain(
     lr: float = 1e-4,
     device: str = "cpu",
     save_path: str = "checkpoints/stage1.pt",
+    amp: bool = False,
 ) -> list:
     print(f"\n{'─'*50}")
     print("Stage 1: Pretrain Sformer-Full (full precision)")
-    print(f"  epochs={epochs}, lr={lr}, device={device}")
+    print(f"  epochs={epochs}, lr={lr}, device={device}, amp={amp}")
     print(f"  train_batches={len(train_loader)}, val_batches={len(val_loader)}")
     print(f"{'─'*50}")
 
     model = model.to(device)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    scaler = _make_grad_scaler(amp)
 
     history = []
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
         for batch in train_loader:
-            frames, ids, mask, labels = [b.to(device) for b in batch]
+            frames, ids, mask, labels = _move_batch(batch, device)
             optimizer.zero_grad()
-            out  = model(frames, ids, mask)
-            loss = model.compute_loss(out, labels)["total"]
-            loss.backward()
+            with _autocast(amp):
+                out  = model(frames, ids, mask)
+                loss = model.compute_loss(out, labels)["total"]
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             total_loss += loss.item()
 
         scheduler.step()
@@ -261,10 +344,11 @@ def stage2_distill_prune(
     prune_ratio: float = 0.3,
     device: str = "cpu",
     save_path: str = "checkpoints/stage2.pt",
+    amp: bool = False,
 ) -> list:
     print(f"\n{'─'*50}")
     print("Stage 2: Structured Pruning + Knowledge Distillation")
-    print(f"  prune_ratio={prune_ratio}, epochs={epochs}, device={device}")
+    print(f"  prune_ratio={prune_ratio}, epochs={epochs}, device={device}, amp={amp}")
     print(f"{'─'*50}")
 
     teacher = teacher.eval().to(device)
@@ -280,22 +364,26 @@ def stage2_distill_prune(
         filter(lambda p: p.requires_grad, student.parameters()),
         lr=lr, weight_decay=1e-2,
     )
+    scaler = _make_grad_scaler(amp)
     history = []
     for epoch in range(1, epochs + 1):
         student.train()
         total, kl_t, feat_t = 0.0, 0.0, 0.0
         for batch in train_loader:
-            frames, ids, mask, labels = [b.to(device) for b in batch]
+            frames, ids, mask, labels = _move_batch(batch, device)
             optimizer.zero_grad()
 
-            with torch.no_grad():
+            with torch.no_grad(), _autocast(amp):
                 t_out = teacher(frames, ids, mask)
-            s_out = student(frames, ids, mask)
+            with _autocast(amp):
+                s_out = student(frames, ids, mask)
+                losses = student.distillation_loss(s_out, t_out, labels)
 
-            losses = student.distillation_loss(s_out, t_out, labels)
-            losses["total"].backward()
+            scaler.scale(losses["total"]).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             total  += losses["total"].item()
             kl_t   += losses["kl"].item()
@@ -329,10 +417,15 @@ def stage3_qat(
     lr: float = 1e-5,
     device: str = "cpu",
     save_path: str = "checkpoints/stage3_qat.pt",
+    amp: bool = False,
 ) -> list:
+    if amp:
+        print("  AMP disabled for QAT to avoid fake-quant dtype mismatches.")
+        amp = False
+
     print(f"\n{'─'*50}")
     print("Stage 3: Quantization-Aware Training (INT8/mix-precision)")
-    print(f"  epochs={epochs}, lr={lr}")
+    print(f"  epochs={epochs}, lr={lr}, device={device}, amp={amp}")
     print(f"{'─'*50}")
 
     try:
@@ -342,18 +435,21 @@ def stage3_qat(
 
     model = model.to(device)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
+    scaler = _make_grad_scaler(amp)
     history = []
 
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
         for batch in train_loader:
-            frames, ids, mask, labels = [b.to(device) for b in batch]
+            frames, ids, mask, labels = _move_batch(batch, device)
             optimizer.zero_grad()
-            out  = model(frames, ids, mask)
-            loss = model.compute_loss(out, labels)["total"]
-            loss.backward()
-            optimizer.step()
+            with _autocast(amp):
+                out  = model(frames, ids, mask)
+                loss = model.compute_loss(out, labels)["total"]
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             total_loss += loss.item()
 
         avg  = total_loss / len(train_loader)
@@ -376,12 +472,25 @@ def main(args):
     from models.snformer import SnFormer
 
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    use_amp = _configure_t4_runtime(device, args.no_amp)
+    run_dir = _make_run_dir(args.output_dir, args.run_name, args.stage, args.overwrite)
+    checkpoint_dir = run_dir / "checkpoints"
+    results_dir = run_dir / "results"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    _copy_source_snapshot(run_dir)
+
     print(f"\nSformer/SnFormer Training Pipeline")
     print(f"Device: {device.upper()} | Stage: {args.stage}")
+    if device == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"Run dir: {run_dir}")
+    print(f"Checkpoints: {checkpoint_dir}")
+    print(f"Results: {results_dir}")
 
     data_dir = args.data_dir
     if not args.dummy and not args.data_csv and data_dir is None:
-        data_dir = str(DEFAULT_DATA_DIR)
+        data_dir = str(_default_data_dir())
         print(f"Dataset mặc định: {data_dir}")
 
     # ── Chọn DataLoader ──────────────────────────────────────────────────────
@@ -413,43 +522,59 @@ def main(args):
             max_fake_samples=_sample_limit(args.max_fake_samples),
         )
 
-    all_history = _load_training_history()
+    history_path = results_dir / "training_history.json"
+    all_history = _load_training_history(str(history_path))
 
     if args.stage in (1, 0):
         model = Sformer(pretrained=False)
         h = stage1_pretrain(
             model, train_loader, val_loader,
             args.epochs, args.lr, device,
-            "checkpoints/sformer_stage1.pt",
+            str(checkpoint_dir / "sformer_stage1.pt"),
+            amp=use_amp,
         )
         all_history["stage1"] = h
 
     if args.stage in (2, 0):
         teacher = Sformer(pretrained=False)
         student = SnFormer(pretrained=False)
-        if Path("checkpoints/sformer_stage1.pt").exists():
+        stage1_checkpoint = _checkpoint_path(
+            args.checkpoint_dir,
+            "sformer_stage1.pt",
+        )
+        if not args.checkpoint_dir:
+            stage1_checkpoint = checkpoint_dir / "sformer_stage1.pt"
+        if stage1_checkpoint.exists():
             teacher.load_state_dict(
-                torch.load("checkpoints/sformer_stage1.pt", map_location=device)
+                torch.load(stage1_checkpoint, map_location=device)
             )
-            print("  ✓ Loaded teacher từ stage1 checkpoint")
+            print(f"  ✓ Loaded teacher từ {stage1_checkpoint}")
         h = stage2_distill_prune(
             teacher, student, train_loader, val_loader,
-            args.epochs // 2, args.lr * 0.3,
+            max(1, args.epochs // 2), args.lr * 0.3,
             args.prune_ratio, device,
-            "checkpoints/snformer_stage2.pt",
+            str(checkpoint_dir / "snformer_stage2.pt"),
+            amp=use_amp,
         )
         all_history["stage2"] = h
 
     if args.stage in (3, 0):
         model = SnFormer(pretrained=False)
-        if Path("checkpoints/snformer_stage2.pt").exists():
+        stage2_checkpoint = _checkpoint_path(
+            args.checkpoint_dir,
+            "snformer_stage2.pt",
+        )
+        if not args.checkpoint_dir:
+            stage2_checkpoint = checkpoint_dir / "snformer_stage2.pt"
+        if stage2_checkpoint.exists():
             model.load_state_dict(
-                torch.load("checkpoints/snformer_stage2.pt", map_location=device)
+                torch.load(stage2_checkpoint, map_location=device)
             )
         h = stage3_qat(
             model, train_loader, val_loader,
             max(2, args.epochs // 5), args.lr * 0.1, device,
-            "checkpoints/snformer_stage3_qat.pt",
+            str(checkpoint_dir / "snformer_stage3_qat.pt"),
+            amp=use_amp,
         )
         all_history["stage3"] = h
 
@@ -465,20 +590,20 @@ def main(args):
         )
         if test_loader is not None:
             # Lấy model cuối cùng đã train
-            if args.stage in (3, 0) and Path("checkpoints/snformer_stage3_qat.pt").exists():
+            if args.stage in (3, 0) and (checkpoint_dir / "snformer_stage3_qat.pt").exists():
                 eval_model = SnFormer(pretrained=False)
                 eval_model.load_state_dict(
-                    torch.load("checkpoints/snformer_stage3_qat.pt", map_location=device)
+                    torch.load(checkpoint_dir / "snformer_stage3_qat.pt", map_location=device)
                 )
-            elif args.stage in (2, 0) and Path("checkpoints/snformer_stage2.pt").exists():
+            elif args.stage in (2, 0) and (checkpoint_dir / "snformer_stage2.pt").exists():
                 eval_model = SnFormer(pretrained=False)
                 eval_model.load_state_dict(
-                    torch.load("checkpoints/snformer_stage2.pt", map_location=device)
+                    torch.load(checkpoint_dir / "snformer_stage2.pt", map_location=device)
                 )
-            elif args.stage == 1 and Path("checkpoints/sformer_stage1.pt").exists():
+            elif args.stage == 1 and (checkpoint_dir / "sformer_stage1.pt").exists():
                 eval_model = Sformer(pretrained=False)
                 eval_model.load_state_dict(
-                    torch.load("checkpoints/sformer_stage1.pt", map_location=device)
+                    torch.load(checkpoint_dir / "sformer_stage1.pt", map_location=device)
                 )
             else:
                 eval_model = None
@@ -502,10 +627,10 @@ def main(args):
                     print("             test/ không có nhãn real/fake, chỉ xuất thống kê dự đoán")
                 all_history["test"] = test_metrics
 
-    os.makedirs("results", exist_ok=True)
-    with open("results/training_history.json", "w") as f:
+    with open(history_path, "w", encoding="utf-8") as f:
         json.dump(all_history, f, indent=2)
-    print(f"\n✓ Training history → results/training_history.json")
+    print(f"\n✓ Training history → {history_path}")
+    print(f"✓ Source snapshot → {run_dir / 'source_snapshot'}")
 
 
 if __name__ == "__main__":
@@ -518,7 +643,7 @@ if __name__ == "__main__":
     # Dataset — chọn 1 trong 3 (mutually exclusive)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--data-dir",  type=str, default=None,
-                       help="Folder dataset: data_dir/{real,fake,test}/...; mặc định là train/")
+                       help="Folder dataset: data_dir/{real,fake,test}/...; local mặc định train/, Kaggle mặc định /kaggle/input")
     group.add_argument("--data-csv",  type=str, default=None,
                        help="CSV manifest: cột path,label[,text]")
     group.add_argument("--dummy",     action="store_true",
@@ -539,6 +664,17 @@ if __name__ == "__main__":
                         help="Số mẫu fake lấy ngẫu nhiên để train/val; 0 = dùng toàn bộ")
     parser.add_argument("--skip-test",    action="store_true",
                         help="Bỏ qua đánh giá/inference trên data_dir/test")
+    # Kaggle/output controls
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Thư mục gốc để ghi run artifacts; Kaggle mặc định /kaggle/working/snformer_runs")
+    parser.add_argument("--run-name", type=str, default=None,
+                        help="Tên thư mục run. Nếu trùng sẽ tự thêm _02, _03 trừ khi dùng --overwrite")
+    parser.add_argument("--checkpoint-dir", type=str, default=None,
+                        help="Thư mục checkpoint đầu vào khi chạy riêng stage 2/3")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Cho phép ghi vào run_dir đã tồn tại")
+    parser.add_argument("--no-amp", action="store_true",
+                        help="Tắt mixed precision AMP trên GPU")
     # Legacy — chỉ dùng với --dummy
     parser.add_argument("--n-samples",   type=int,   default=64,
                         help="Số sample trong dummy dataset")
