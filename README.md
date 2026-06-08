@@ -113,23 +113,33 @@ python benchmark/run_benchmark.py --num-frames 8 --iters 100
 # Demo/debug không cần dataset thực
 python train/trainer.py --stage 1 --dummy --epochs 1 --batch-size 2 --num-frames 1 --seq-len 32 --cpu
 
-# Smoke test nhanh bằng dữ liệu thật trên CPU
-python train/trainer.py --stage 1 --epochs 1 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 64 --max-fake-samples 32 --cpu --skip-test
+# Kiểm tra nhanh trên CPU với dữ liệu thật, cân bằng class 64 real / 64 fake
+python train/trainer.py --stage 1 --epochs 2 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 64 --max-fake-samples 64 --cpu --skip-test
 
-# Stage 1: Pretrain Sformer-Full trên CPU i7/16GB
-python train/trainer.py --stage 1 --epochs 5 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --max-real-samples 2000 --max-fake-samples 300 --cpu
+# Train lại từ đầu toàn pipeline trên CPU, cân bằng class 64 real / 64 fake.
+# Dùng để kiểm chứng nhanh trong lúc phát triển; stage 2 sẽ chạy epochs/2, stage 3 chạy max(2, epochs/5).
+python train/trainer.py --stage 0 --epochs 6 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 64 --max-fake-samples 64 --prune-ratio 0.1 --cpu --skip-test
 
-# Stage 2: Structured Pruning + Knowledge Distillation nhẹ
-python train/trainer.py --stage 2 --epochs 2 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --max-real-samples 1000 --max-fake-samples 200 --prune-ratio 0.2 --cpu --skip-test
+# Train lại từ đầu với dataset hiện tại, cân bằng 590 real / 590 fake.
+# CPU profile: 1 frame/clip, seq_len ngắn, batch nhỏ; stage 2 chạy epochs/2, stage 3 chạy max(2, epochs/5).
+# Đây là cấu hình khuyến nghị để train lại từ đầu trên CPU mà không vượt quá tải thông thường.
+python train/trainer.py --stage 0 --epochs 6 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 590 --max-fake-samples 590 --prune-ratio 0.15 --cpu --skip-test
 
-# Stage 3: QAT INT8 nhẹ
-python train/trainer.py --stage 3 --epochs 2 --batch-size 2 --num-workers 0 --num-frames 2 --seq-len 64 --max-real-samples 800 --max-fake-samples 160 --cpu --skip-test
+# Nếu CPU đủ mạnh và có nhiều thời gian hơn, có thể tăng stage 1 lên 10 epoch.
+python train/trainer.py --stage 0 --epochs 10 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 590 --max-fake-samples 590 --prune-ratio 0.15 --cpu --skip-test
 
-# Stage 0 chạy toàn pipeline, chỉ nên smoke test trên CPU
-python train/trainer.py --stage 0 --epochs 2 --batch-size 1 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 64 --max-fake-samples 32 --prune-ratio 0.1 --cpu --skip-test
+# Nếu muốn chạy từng stage thay vì stage 0, giữ đúng nguyên tắc cân bằng real=fake.
+python train/trainer.py --stage 1 --epochs 6 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 590 --max-fake-samples 590 --cpu --skip-test
+python train/trainer.py --stage 2 --epochs 3 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 590 --max-fake-samples 590 --prune-ratio 0.15 --cpu --skip-test
+python train/trainer.py --stage 3 --epochs 2 --batch-size 2 --num-workers 0 --num-frames 1 --seq-len 32 --max-real-samples 590 --max-fake-samples 590 --cpu --skip-test
+
+# Test một video hoặc ảnh sau khi train
+python test.py --input Deepfake.mp4 --model all
 ```
 
 Nếu không truyền `--data-dir` hoặc `--data-csv`, `trainer.py` mặc định dùng `train/`.
+Để tránh mô hình học thiên lệch `REAL`, luôn đặt `--max-real-samples` bằng `--max-fake-samples`.
+Với dataset hiện tại có 590 mẫu real và 795 mẫu fake, cấu hình cân bằng đầy đủ là `--max-real-samples 590 --max-fake-samples 590`.
 
 ---
 

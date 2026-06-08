@@ -18,6 +18,14 @@ checkpoints/
 *.tflite
 results/*.json
 results/*.log
+results/backup_before_*/
+
+# Local media samples
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
 
 # Data (download separately)
 data/raw/
